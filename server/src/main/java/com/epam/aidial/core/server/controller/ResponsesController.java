@@ -15,6 +15,7 @@ import com.epam.aidial.core.server.Proxy;
 import com.epam.aidial.core.server.ProxyContext;
 import com.epam.aidial.core.server.data.ApiKeyData;
 import com.epam.aidial.core.server.data.ErrorData;
+import com.epam.aidial.core.server.data.ResponseMetadata;
 import com.epam.aidial.core.server.function.BaseRequestFunction;
 import com.epam.aidial.core.server.function.BuildUpstreamCacheFn;
 import com.epam.aidial.core.server.function.CollectDeploymentsFn;
@@ -31,11 +32,12 @@ import com.epam.aidial.core.server.function.request.ResponsesApiRequest;
 import com.epam.aidial.core.server.log.AnalyticsLogContext;
 import com.epam.aidial.core.server.service.PermissionDeniedException;
 import com.epam.aidial.core.server.upstream.UpstreamRoute;
+import com.epam.aidial.core.server.util.BucketBuilder;
 import com.epam.aidial.core.server.util.DeploymentEndpointUtil;
 import com.epam.aidial.core.server.util.EncryptedAffinityUtil;
 import com.epam.aidial.core.server.util.JsonUtil;
 import com.epam.aidial.core.server.util.ProxyUtil;
-import com.epam.aidial.core.server.util.ResponseIdUtil;
+import com.epam.aidial.core.storage.util.EtagHeader;
 import com.epam.aidial.core.server.vertx.stream.BufferingReadStream;
 import com.epam.aidial.core.storage.exception.ResourceNotFoundException;
 import com.epam.aidial.core.storage.http.HttpException;
@@ -51,7 +53,6 @@ import io.vertx.core.http.HttpServerResponse;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.Strings;
-import org.apache.commons.lang3.tuple.Pair;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -359,6 +360,8 @@ public class ResponsesController extends BaseDeploymentPostController {
         response.putHeader(Proxy.HEADER_UPSTREAM_ATTEMPTS, Integer.toString(context.getUpstreamRoute().getAttemptCount()));
 
         if (context.isBackgroundJob()) {
+            response.end(updatedBody);
+            completeProxyResponse(null);
             return Future.succeededFuture();
         } else {
             return collectTokenUsage(updatedBody)
@@ -395,6 +398,19 @@ public class ResponsesController extends BaseDeploymentPostController {
             String upstreamResponseId = idNode.asText();
             String dialId = EncryptedAffinityUtil.wrapResponseId(upstream.getId(), upstreamResponseId, context.getDeployment().getName());
             object.put("id", dialId);
+            if (context.isStoreResponse()) {
+                ResponseMetadata metadata = ResponseMetadata.builder()
+                        .upstreamId(upstream.getId())
+                        .deploymentName(context.getDeployment().getName())
+                        .initiatorBucket(BucketBuilder.buildInitiatorBucket(context))
+                        .build();
+                proxy.getTaskExecutor()
+                        .submit(() -> {
+                            proxy.getResponseMetadataService().saveMetadata(dialId, metadata, EtagHeader.NEW_ONLY);
+                            return null;
+                        })
+                        .onFailure(e -> log.warn("Failed to save response metadata for {}", dialId, e));
+            }
         }
         return Buffer.buffer(JsonUtil.serialize(object));
     }
@@ -415,6 +431,20 @@ public class ResponsesController extends BaseDeploymentPostController {
         completionFuture.onComplete(result -> {
             if (result.failed()) {
                 log.warn("Failed to collect token usage", result.cause());
+            }
+            if (context.isStoreResponse() && dialId != null) {
+                Upstream upstream = context.getUpstreamRoute().get();
+                ResponseMetadata metadata = ResponseMetadata.builder()
+                        .upstreamId(upstream.getId())
+                        .deploymentName(context.getDeployment().getName())
+                        .initiatorBucket(BucketBuilder.buildInitiatorBucket(context))
+                        .build();
+                proxy.getTaskExecutor()
+                        .submit(() -> {
+                            proxy.getResponseMetadataService().saveMetadata(dialId, metadata, EtagHeader.ANY);
+                            return null;
+                        })
+                        .onFailure(e -> log.warn("Failed to save response metadata for {}", dialId, e));
             }
             responseStream.end(context.getResponse());
             completeProxyResponse(assembledStreamingResponse);
