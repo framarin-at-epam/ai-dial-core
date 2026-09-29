@@ -37,11 +37,11 @@ import com.epam.aidial.core.server.util.DeploymentEndpointUtil;
 import com.epam.aidial.core.server.util.EncryptedAffinityUtil;
 import com.epam.aidial.core.server.util.JsonUtil;
 import com.epam.aidial.core.server.util.ProxyUtil;
-import com.epam.aidial.core.storage.util.EtagHeader;
 import com.epam.aidial.core.server.vertx.stream.BufferingReadStream;
 import com.epam.aidial.core.storage.exception.ResourceNotFoundException;
 import com.epam.aidial.core.storage.http.HttpException;
 import com.epam.aidial.core.storage.http.HttpStatus;
+import com.epam.aidial.core.storage.util.EtagHeader;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.vertx.core.Future;
@@ -329,7 +329,8 @@ public class ResponsesController extends BaseDeploymentPostController {
         }
 
         ExtractTerminalResponseFn extractFn = new ExtractTerminalResponseFn(proxy, context);
-        EncryptedContentWrapFn wrapFn = new EncryptedContentWrapFn(proxy, context, currentUpstream.getId());
+        EncryptedContentWrapFn wrapFn = new EncryptedContentWrapFn(
+                proxy, context, currentUpstream.getId(), this::onDialResponseIdAvailable);
         BufferingReadStream responseStream = createResponseStream(proxyResponse, () -> {
             CollectResponsesApiOutputAttachmentsFn attachmentsFn = new CollectResponsesApiOutputAttachmentsFn(proxy, context);
             return new ResponsesSseListener(List.of(wrapFn, attachmentsFn, extractFn));
@@ -343,27 +344,26 @@ public class ResponsesController extends BaseDeploymentPostController {
                 .endOnFailure(false)
                 .endOnSuccess(false)
                 .to(response)
-                .onSuccess(ignored -> handleStreamingResponse(responseStream, wrapFn.getDialId(), extractFn.getAssembledStreamingResponse()))
+                .onSuccess(ignored -> handleStreamingResponse(responseStream, wrapFn.getDialResponseId(), extractFn.getAssembledStreamingResponse()))
                 .onFailure(error -> handleResponseError(error, responseStream));
     }
 
     private Future<Void> handleNonStreamingResponse(HttpClientResponse proxyResponse, Buffer body) {
-        Buffer updatedBody = proxyResponse.statusCode() == 200
-                ? rewrite(body)
-                : body;
-        context.setResponseBody(updatedBody);
-        context.setResponseBodyTimestamp(System.currentTimeMillis());
-        HttpServerResponse response = context.getResponse();
-        ProxyUtil.copyResponse(response, proxyResponse);
-        response.setChunked(false);
-        response.putHeader(HttpHeaders.CONTENT_LENGTH, Integer.toString(updatedBody.length()));
-        response.putHeader(Proxy.HEADER_UPSTREAM_ATTEMPTS, Integer.toString(context.getUpstreamRoute().getAttemptCount()));
+        return rewrite(proxyResponse.statusCode(), body).compose(updatedBody -> {
+            context.setResponseBody(updatedBody);
+            context.setResponseBodyTimestamp(System.currentTimeMillis());
+            HttpServerResponse response = context.getResponse();
+            ProxyUtil.copyResponse(response, proxyResponse);
+            response.setChunked(false);
+            response.putHeader(HttpHeaders.CONTENT_LENGTH, Integer.toString(updatedBody.length()));
+            response.putHeader(Proxy.HEADER_UPSTREAM_ATTEMPTS, Integer.toString(context.getUpstreamRoute().getAttemptCount()));
 
-        if (context.isBackgroundJob()) {
-            response.end(updatedBody);
-            completeProxyResponse(null);
-            return Future.succeededFuture();
-        } else {
+            if (context.isBackgroundJob()) {
+                response.end(updatedBody);
+                completeProxyResponse(null);
+                return Future.succeededFuture();
+            }
+
             return collectTokenUsage(updatedBody)
                     .transform(result -> {
                         if (result.failed()) {
@@ -378,51 +378,61 @@ public class ResponsesController extends BaseDeploymentPostController {
                         response.end(updatedBody);
                         completeProxyResponse(null);
                     });
-        }
+        });
     }
 
-    private Buffer rewrite(Buffer body) {
+    private Future<Void> onDialResponseIdAvailable(String dialResponseId) {
+        if (context.isStoreResponse()) {
+            ResponseMetadata metadata = ResponseMetadata.builder()
+                    .deploymentName(context.getDeployment().getName())
+                    .initiatorBucket(BucketBuilder.buildInitiatorBucket(context))
+                    .build();
+            return proxy.getTaskExecutor()
+                    .<Void>submit(() -> {
+                        proxy.getResponseMetadataService().saveMetadata(dialResponseId, metadata, EtagHeader.NEW_ONLY);
+                        return null;
+                    })
+                    .onFailure(e -> log.warn("Failed to save response metadata for {}", dialResponseId, e));
+        }
+
+        return Future.succeededFuture();
+    }
+
+    private Future<Buffer> rewrite(int statusCode, Buffer body) {
+        if (statusCode == 200) {
+            return Future.succeededFuture(body);
+        }
+
         JsonNode tree = JsonUtil.tryParse(body.getBytes());
         if (!tree.isObject() || !(tree instanceof ObjectNode object)) {
             log.warn("Response body is not a JSON object, skipping rewrite. Deployment: {}. Endpoint: {}",
                     context.getDeployment().getName(),
                     context.getProxyRequestUri());
-            return body;
+            return Future.succeededFuture(body);
         }
 
         Upstream upstream = context.getUpstreamRoute().get();
         EncryptedAffinityUtil.wrapOutputArray(object.path("output"), upstream.getId());
 
+        Future<Void> result = Future.succeededFuture();
         JsonNode idNode = object.path("id");
         if (idNode.isTextual()) {
             String upstreamResponseId = idNode.asText();
-            String dialId = EncryptedAffinityUtil.wrapResponseId(upstream.getId(), upstreamResponseId, context.getDeployment().getName());
-            object.put("id", dialId);
-            if (context.isStoreResponse()) {
-                ResponseMetadata metadata = ResponseMetadata.builder()
-                        .upstreamId(upstream.getId())
-                        .deploymentName(context.getDeployment().getName())
-                        .initiatorBucket(BucketBuilder.buildInitiatorBucket(context))
-                        .build();
-                proxy.getTaskExecutor()
-                        .submit(() -> {
-                            proxy.getResponseMetadataService().saveMetadata(dialId, metadata, EtagHeader.NEW_ONLY);
-                            return null;
-                        })
-                        .onFailure(e -> log.warn("Failed to save response metadata for {}", dialId, e));
-            }
+            String dialResponseId = EncryptedAffinityUtil.wrapResponseId(upstream.getId(), upstreamResponseId, context.getDeployment().getName());
+            object.put("id", dialResponseId);
+            result = onDialResponseIdAvailable(dialResponseId);
         }
-        return Buffer.buffer(JsonUtil.serialize(object));
+        return result.map(Buffer.buffer(JsonUtil.serialize(object)));
     }
 
-    private void handleStreamingResponse(BufferingReadStream responseStream, String dialId, String assembledStreamingResponse) {
+    private void handleStreamingResponse(BufferingReadStream responseStream, String dialResponseId, String assembledStreamingResponse) {
         Buffer responseBody = responseStream.getContent();
         context.setResponseBody(responseBody);
         context.setResponseBodyTimestamp(System.currentTimeMillis());
 
         Future<Void> completionFuture;
-        if (context.isBackgroundJob()) {
-            completionFuture = proxy.getBackgroundJobService().deleteJob(dialId)
+        if (context.isBackgroundJob() && dialResponseId != null) {
+            completionFuture = proxy.getBackgroundJobService().deleteJob(dialResponseId)
                     .compose(deleted -> deleted ? collectTokenUsage(responseBody) : Future.succeededFuture());
         } else {
             completionFuture = collectTokenUsage(responseBody);
@@ -431,20 +441,6 @@ public class ResponsesController extends BaseDeploymentPostController {
         completionFuture.onComplete(result -> {
             if (result.failed()) {
                 log.warn("Failed to collect token usage", result.cause());
-            }
-            if (context.isStoreResponse() && dialId != null) {
-                Upstream upstream = context.getUpstreamRoute().get();
-                ResponseMetadata metadata = ResponseMetadata.builder()
-                        .upstreamId(upstream.getId())
-                        .deploymentName(context.getDeployment().getName())
-                        .initiatorBucket(BucketBuilder.buildInitiatorBucket(context))
-                        .build();
-                proxy.getTaskExecutor()
-                        .submit(() -> {
-                            proxy.getResponseMetadataService().saveMetadata(dialId, metadata, EtagHeader.ANY);
-                            return null;
-                        })
-                        .onFailure(e -> log.warn("Failed to save response metadata for {}", dialId, e));
             }
             responseStream.end(context.getResponse());
             completeProxyResponse(assembledStreamingResponse);
