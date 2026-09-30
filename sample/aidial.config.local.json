@@ -204,6 +204,18 @@
             "userRoles": ["role3"]
         }
         ,
+        "gpt-4.1-nano": {
+            "type": "chat",
+            "displayName": "Azure Foundry gpt-4.1-nano",
+            "endpoint": "https://foundryimagerecognitiondev.cognitiveservices.azure.com/openai/deployments/gpt-4.1-nano/chat/completions",
+            "upstreams": [
+                {
+                    "endpoint": "https://foundryimagerecognitiondev.cognitiveservices.azure.com/openai/deployments/gpt-4.1-nano/chat/completions",
+                    "key": "<AZURE_MODEL_API_KEY>"
+                }
+            ],
+            "userRoles": ["default"]
+        },
         "gemma2:2b": {
             "type": "chat",
             "displayName": "Local gemma2:2b",
@@ -212,7 +224,7 @@
             "upstreams": [
                 {
                     "endpoint": "http://localhost:11434/api/chat",
-                    "key": "AZURE_MODEL_API_KEY"
+                    "key": "<AZURE_MODEL_API_KEY>"
                 }
             ]
         }
@@ -238,7 +250,13 @@
         ,
         "dial_api_key": {
             "project": "TEST-PROJECT",
-            "role": "default"
+            "role": "default",
+            "key": "dial_api_key"
+        },
+        "azure_foundry_api_key": {
+            "project": "TEST-PROJECT",
+            "role": "default",
+            "key": "<AZURE_MODEL_API_KEY>"
         }
     },
     "roles": {
@@ -255,7 +273,11 @@
                 "search": {},
                 "forecast": {},
                 "calculator": {},
-                "app": {}
+                "app": {},
+                "gpt-4.1-nano": {
+                    "minute": "100000",
+                    "day": "10000000"
+                }
             }
         },
         "role1": {

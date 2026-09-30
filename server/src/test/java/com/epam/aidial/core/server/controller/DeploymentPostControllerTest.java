@@ -373,13 +373,15 @@ public class DeploymentPostControllerTest {
         when(request.headers()).thenReturn(headers);
         when(context.getDeployment()).thenReturn(application);
 
+        UpstreamRoute upstreamRoute = mock(UpstreamRoute.class, RETURNS_DEEP_STUBS);
+        Upstream upstream = new Upstream();
+        upstream.setKey("upstream-key");
+        when(context.getUpstreamRoute()).thenReturn(upstreamRoute);
+        when(upstreamRoute.get()).thenReturn(upstream);
+
         HttpClientRequest proxyRequest = mock(HttpClientRequest.class, RETURNS_DEEP_STUBS);
         MultiMap proxyHeaders = new HeadersMultiMap();
         when(proxyRequest.headers()).thenReturn(proxyHeaders);
-
-        ApiKeyData proxyApiKeyData = new ApiKeyData();
-        proxyApiKeyData.setPerRequestKey("key1");
-        when(context.getProxyApiKeyData()).thenReturn(proxyApiKeyData);
 
         Buffer requestBody = Buffer.buffer();
         when(context.getRequestBody()).thenReturn(requestBody);
@@ -387,7 +389,7 @@ public class DeploymentPostControllerTest {
         controller.handleProxyRequest(proxyRequest);
 
         assertNull(proxyHeaders.get(AUTHORIZATION));
-        assertEquals("key1", proxyHeaders.get(HEADER_API_KEY));
+        assertEquals("upstream-key", proxyHeaders.get(HEADER_API_KEY));
     }
 
     @Test

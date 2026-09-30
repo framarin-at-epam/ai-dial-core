@@ -318,7 +318,13 @@ public class BaseDeploymentPostController {
         ProxyUtil.copyHeaders(context.getRequest().headers(), proxyRequest.headers(), excludeHeaders);
         ProxyUtil.setOverrideNameHeader(proxyRequest, context.getDeployment());
 
-        proxyRequest.headers().add(Proxy.HEADER_API_KEY, context.getProxyApiKeyData().getPerRequestKey());
+        Upstream resolvedUpstream = context.getUpstreamRoute() == null ? null : context.getUpstreamRoute().get();
+        String upstreamKey = resolvedUpstream != null ? resolvedUpstream.getKey() : null;
+        if (upstreamKey != null && !upstreamKey.isBlank()) {
+            proxyRequest.headers().add(Proxy.HEADER_API_KEY, upstreamKey);
+        } else if (context.getProxyApiKeyData() != null && context.getProxyApiKeyData().getPerRequestKey() != null) {
+            proxyRequest.headers().add(Proxy.HEADER_API_KEY, context.getProxyApiKeyData().getPerRequestKey());
+        }
 
         proxyRequest.putHeader(Proxy.HEADER_DEPLOYMENT_FEATURES,
                 ProxyUtil.convertToString(FeaturesData.createDeploymentFeatures(context.getDeployment())));
