@@ -1,0 +1,25 @@
+{
+  "config": {
+    "files": ["/home/admin/git/default/ai-dial-core/sample/aidial.config.local.json"],
+    "reload": 60000
+  },
+  "redis": {
+    "singleServerConfig": {
+      "address": "redis://localhost:16370"
+    }
+  }
+  ,
+  "identityProviders": {
+    "test": {
+      "disableJwtVerification": true,
+      "rolePath": "role",
+      "issuer": "local-test",
+      "jwks": {}
+    }
+  }
+  ,
+  "encryption": {
+    "key": "local-dev-key",
+    "secret": "local-dev-secret"
+  }
+}
